@@ -1,33 +1,28 @@
-import os, io, uuid, shutil, tempfile, textwrap, datetime as dt, re
+import os, io, uuid, shutil, tempfile, textwrap, datetime as dt, re, urllib.parse
 import streamlit as st
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 from fpdf import FPDF
 
-# Fast, stateless text similarity
 from sklearn.feature_extraction.text import HashingVectorizer, CountVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from difflib import SequenceMatcher
 
-# VADER
 import nltk
 from nltk.sentiment import SentimentIntensityAnalyzer
 
-# Optional word cloud
 WC_AVAILABLE = True
 try:
     from wordcloud import WordCloud, STOPWORDS
 except Exception:
     WC_AVAILABLE = False
 
-# Profanity filter
 from better_profanity import profanity
 
-# ---------------- Streamlit Page ----------------
 st.set_page_config(page_title="✈️ Twitter Sentiment", layout="centered")
 
-# --------------- Theme & Styling ---------------
+# ---------------- Theme & Styling ----------------
 GRADIENTS_LIGHT = {
     "Candy (pink→peach→sky)": "linear-gradient(180deg, #ff9a9e 0%, #fecfef 45%, #a1c4fd 100%)",
     "Aurora (teal→mint→violet)": "linear-gradient(180deg, #10b981 0%, #99f6e4 45%, #a78bfa 100%)",
@@ -35,6 +30,9 @@ GRADIENTS_LIGHT = {
     "Lagoon (aqua→sky→indigo)": "linear-gradient(180deg, #34d399 0%, #60a5fa 50%, #6366f1 100%)",
     "Peach Fizz (peach→rose)": "linear-gradient(180deg, #ffd1a6 0%, #ff9eb5 100%)",
     "Citrus Mint (lime→mint)": "linear-gradient(180deg, #bef264 0%, #34d399 100%)",
+    "Bubblegum (rose→lavender)": "linear-gradient(180deg, #ffafbd 0%, #ffc3a0 40%, #cbb4d4 100%)",
+    "Skyberry (blue→orchid)": "linear-gradient(180deg, #74ebd5 0%, #acb6e5 100%)",
+    "Cocoa Cream (tan→rose)": "linear-gradient(180deg, #f6d365 0%, #fda085 100%)",
 }
 GRADIENTS_DARK = {
     "Cosmos (navy→violet)": "linear-gradient(180deg, #0f172a 0%, #312e81 100%)",
@@ -43,6 +41,9 @@ GRADIENTS_DARK = {
     "Aurora Night (cyan→indigo)": "linear-gradient(180deg, #0891b2 0%, #3730a3 100%)",
     "Midnight Bloom (blue→pink)": "linear-gradient(180deg, #1e3a8a 0%, #db2777 100%)",
     "Forest Dusk (green→slate)": "linear-gradient(180deg, #065f46 0%, #1f2937 100%)",
+    "Midnight Teal (teal→black)": "linear-gradient(180deg, #134e4a 0%, #0b0f14 100%)",
+    "Plum Fog (plum→slate)": "linear-gradient(180deg, #3b0764 0%, #111827 100%)",
+    "Steel Glow (slate→violet)": "linear-gradient(180deg, #111827 0%, #6d28d9 100%)",
 }
 
 st.sidebar.header("🎨 Theme & Controls")
@@ -66,8 +67,14 @@ st.markdown(f"""
 h1, h2, h3, label, .stMarkdown, .stTextInput, .stDataFrame {{ color:{TEXT_COLOR}; }}
 .metric-card {{ background:rgba(248,250,252,0.6); border:1px solid {BORDER}; padding:.75rem 1rem; border-radius:10px; }}
 .download-row button {{ background:linear-gradient(90deg,#6366f1,#22c55e)!important; color:white!important; }}
+.sharebar a {{ text-decoration:none; margin-right:.4rem; display:inline-block; padding:.35rem .55rem; border-radius:8px; }}
+.sharebar .wa {{ background:#25D366; color:white; }}
+.sharebar .tg {{ background:#229ED9; color:white; }}
+.sharebar .x  {{ background:#0f1419; color:white; }}
+.sharebar .li {{ background:#0a66c2; color:white; }}
+.sharebar .em {{ background:#475569; color:white; }}
 </style>
-""", unsafe_allow_html=True)
+""", unsafe_allow_html=True)  # HTML/Markdown styling for the app and share bar. [web:423]
 
 sns.set_theme(style="whitegrid", context="talk")
 
@@ -100,7 +107,6 @@ def ensure_clean_csv():
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
 def load_clean_df():
     df = ensure_clean_csv()
-    # Categoricals for fast filters
     for col in ("airline_sentiment","airline","negativereason"):
         if col in df.columns:
             df[col] = df[col].astype("category")
@@ -120,18 +126,61 @@ def load_clean_df():
 df = load_clean_df()
 sentiments = ["positive","negative","neutral"]
 
-# ---------------- Sidebar analysis controls ----------------
+# ---------------- Sidebar controls ----------------
 viz_choice = st.sidebar.radio("Visualization", ["Overall Sentiment", "Sentiment by Airline", "Top Negative Reasons"])
-top_n_airlines = st.sidebar.slider("Top airlines", 3, 10, 6, 1)
-top_n_reasons = st.sidebar.slider("Top negative reasons", 5, 15, 8, 1)
+top_n_airlines = st.sidebar.slider("Top airlines", 3, 12, 8, 1)
+top_n_reasons = st.sidebar.slider("Top negative reasons", 5, 20, 12, 1)
 granularity = st.sidebar.radio("Timeline granularity", ["Day","Week","Month"], index=1)
+
+# Airline filter (applies to all visuals)
+all_airlines = sorted(pd.Series(df["airline"]).dropna().unique().tolist())
+selected_airlines = st.sidebar.multiselect(
+    "Filter airlines (charts & tables)",
+    options=all_airlines,
+    default=[],
+    placeholder="All airlines",
+    width="stretch",
+)  # Official multiselect control for filtering. [web:412]
+
+def apply_airline_filter(frame: pd.DataFrame) -> pd.DataFrame:
+    if selected_airlines:
+        return frame[frame["airline"].isin(selected_airlines)].copy()
+    return frame.copy()
+
+df_viz = apply_airline_filter(df)
+
+# ---------------- Share bar with safe secrets fallback ----------------
+def get_default_app_url() -> str:
+    try:
+        # st.secrets may raise if secrets.toml is missing, so wrap access. [web:435]
+        return st.secrets.get("APP_URL", "")
+    except Exception:
+        return os.environ.get("APP_URL", "")
+
+with st.sidebar.expander("Share this app"):
+    default_url = get_default_app_url()
+    app_url = st.text_input("Public app URL", value=default_url, placeholder="https://your-app.streamlit.app")
+    if app_url:
+        enc = urllib.parse.quote_plus(app_url)
+        share_html = f"""
+        <div class="sharebar">
+          <a class="wa" href="https://wa.me/?text={enc}" target="_blank">WhatsApp</a>
+          <a class="em" href="mailto:?subject=Twitter%20Sentiment%20Dashboard&body={enc}" target="_blank">Email</a>
+          <a class="tg" href="https://t.me/share/url?url={enc}" target="_blank">Telegram</a>
+          <a class="x"  href="https://twitter.com/intent/tweet?url={enc}&text=Check%20this%20dashboard" target="_blank">X</a>
+          <a class="li" href="https://www.linkedin.com/sharing/share-offsite/?url={enc}" target="_blank">LinkedIn</a>
+        </div>
+        """
+        st.markdown(share_html, unsafe_allow_html=True)  # Renders the share links in HTML. [web:423]
+    else:
+        st.caption("Enter your public app URL to enable one‑click sharing here.")  # Basic UX hint. [web:423]
 
 # ---------------- KPIs ----------------
 st.markdown("## ✈️ Twitter Airline Sentiment Dashboard")
 c1, c2, c3 = st.columns(3)
-with c1: st.markdown(f"<div class='metric-card'>🧾 Total tweets<br><b>{len(df):,}</b></div>", unsafe_allow_html=True)
-with c2: st.markdown(f"<div class='metric-card'>😠 Negative share<br><b>{(df['airline_sentiment'].eq('negative').mean()*100):.1f}%</b></div>", unsafe_allow_html=True)
-with c3: st.markdown(f"<div class='metric-card'>🏢 Airlines<br><b>{df['airline'].nunique()}</b></div>", unsafe_allow_html=True)
+with c1: st.markdown(f"<div class='metric-card'>🧾 Total tweets<br><b>{len(df_viz):,}</b></div>", unsafe_allow_html=True)
+with c2: st.markdown(f"<div class='metric-card'>😠 Negative share<br><b>{(df_viz['airline_sentiment'].eq('negative').mean()*100):.1f}%</b></div>", unsafe_allow_html=True)
+with c3: st.markdown(f"<div class='metric-card'>🏢 Airlines<br><b>{pd.Series(df_viz['airline']).nunique()}</b></div>", unsafe_allow_html=True)
 
 # ---------------- Plot helpers ----------------
 def wrap_labels(labels, width=20):
@@ -140,22 +189,25 @@ def wrap_labels(labels, width=20):
 def fig_to_buf(fig, dpi=170):
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
-    buf.seek(0)
-    plt.close(fig)
+    buf.seek(0); plt.close(fig)
     return buf
 
-def show_overall():
-    counts = df["airline_sentiment"].value_counts().reindex(sentiments).fillna(0)
+def show_overall(frame: pd.DataFrame):
+    counts = frame["airline_sentiment"].value_counts().reindex(sentiments).fillna(0)
     s = pd.DataFrame({"sentiment": counts.index, "count": counts.values})
     fig, ax = plt.subplots(figsize=(7.5,4.5), constrained_layout=True)
     sns.barplot(data=s, x="sentiment", y="count", hue="sentiment", palette="pastel", legend=False, ax=ax)
     ax.set_xlabel("Sentiment"); ax.set_ylabel("Number of tweets"); ax.set_title("Overall Sentiment Distribution", pad=10)
-    ax.bar_label(ax.containers[0], fmt="%d", padding=3)
+    ax.bar_label(ax.containers[0], fmt="%d", padding=3)  # Annotate bars. [web:397]
     return fig_to_buf(fig)
 
-def show_by_airline(n=6):
-    top_air = df["airline"].value_counts().nlargest(n).index
-    dfa = df[df["airline"].isin(top_air)]
+def show_by_airline(frame: pd.DataFrame, n=6):
+    top_air = frame["airline"].value_counts().nlargest(n).index
+    dfa = frame[frame["airline"].isin(top_air)]
+    if dfa.empty:
+        fig, ax = plt.subplots(figsize=(8.5,4.8), constrained_layout=True)
+        ax.text(0.5, 0.5, "No data for selected airlines", ha="center", va="center")
+        return fig_to_buf(fig)
     pivot = dfa.groupby(["airline","airline_sentiment"]).size().unstack(fill_value=0).reindex(columns=sentiments).loc[top_air]
     fig, ax = plt.subplots(figsize=(8.5,4.8), constrained_layout=True)
     pivot.plot(kind="bar", stacked=True, ax=ax, color=sns.color_palette("husl", 3))
@@ -164,23 +216,27 @@ def show_by_airline(n=6):
     ax.set_xticklabels(wrap_labels(pivot.index, 14), rotation=15, ha="right")
     return fig_to_buf(fig)
 
-def show_neg_reasons(k=8):
-    neg = df[df["airline_sentiment"]=="negative"]
+def show_neg_reasons(frame: pd.DataFrame, k=8):
+    neg = frame[frame["airline_sentiment"]=="negative"]
     top = neg["negativereason"].dropna().astype(str).value_counts().nlargest(k)
+    if top.empty:
+        fig, ax = plt.subplots(figsize=(8.8,5.2), constrained_layout=True)
+        ax.text(0.5, 0.5, "No negative reasons in selection", ha="center", va="center")
+        return fig_to_buf(fig)
     fig, ax = plt.subplots(figsize=(8.8,5.2), constrained_layout=True)
     sns.barplot(y=wrap_labels(top.index, 24), x=top.values, orient="h", palette=sns.color_palette("crest", n_colors=k), ax=ax)
     ax.set_xlabel("Number of tweets"); ax.set_ylabel("Negative reason"); ax.set_title("Top Negative Reasons", pad=10)
-    for c in ax.containers: ax.bar_label(c, fmt="%d", padding=3)
+    for c in ax.containers: ax.bar_label(c, fmt="%d", padding=3)  # Annotate bars. [web:397]
     return fig_to_buf(fig)
 
 # ---------------- Show one chart ----------------
 st.markdown("### 📊 Visualization")
 if viz_choice == "Overall Sentiment":
-    st.image(show_overall(), width="stretch", caption="Overall distribution")
+    st.image(show_overall(df_viz), width="stretch", caption="Overall distribution")
 elif viz_choice == "Sentiment by Airline":
-    st.image(show_by_airline(top_n_airlines), width="stretch", caption="Stacked counts by airline")
+    st.image(show_by_airline(df_viz, top_n_airlines), width="stretch", caption="Stacked counts by airline")
 else:
-    st.image(show_neg_reasons(top_n_reasons), width="stretch", caption="Top drivers of negative tweets")
+    st.image(show_neg_reasons(df_viz, top_n_reasons), width="stretch", caption="Top drivers of negative tweets")
 
 # ---------------- Analyzer: HashingVectorizer + cosine ----------------
 st.markdown("### 📝 Your Tweet Analyzer")
@@ -266,34 +322,31 @@ def timeline_series(df_in, term, granularity):
         return pd.Series(dtype=int), None
     rule = {"Day":"D","Week":"W","Month":"M"}[granularity]
     norm = df_in["display_text"].fillna("").str.lower()
-    mask = norm.str.contains(rf"\\b{re.escape(term)}\\b", regex=True)
+    mask = norm.str_contains = norm.str.contains(rf"\\b{re.escape(term)}\\b", regex=True)
     sub = df_in.loc[mask].dropna(subset=["tweet_created_dt"])
     if sub.empty:
         return pd.Series(dtype=int), None
     start = sub["tweet_created_dt"].min().floor("D")
     end = sub["tweet_created_dt"].max().ceil("D")
-    ts = (sub.set_index("tweet_created_dt")
-              .sort_index()
-              .resample(rule)
-              .size())
+    ts = (sub.set_index("tweet_created_dt").sort_index().resample(rule).size())
     full = pd.date_range(start, end, freq=rule)
     ts = ts.reindex(full, fill_value=0)
     return ts, (start, end)
 
 kw = st.text_input("Keyword (we will chart it by default and add related terms if present)")
+frame_for_timeline = df_viz
 if kw:
-    ts_main, span = timeline_series(df, kw, granularity)
+    ts_main, span = timeline_series(frame_for_timeline, kw, granularity)
     import matplotlib.dates as mdates
     fig, ax = plt.subplots(figsize=(9.5,4.0), constrained_layout=True)
     if ts_main.empty:
-        # Default single zero point to avoid empty viz
         ax.plot([pd.Timestamp.today().floor('D')], [0], marker="o", color="#0ea5e9", label=kw.lower())
         ax.set_title(f"No dated tweets for '{kw}'. Showing placeholder.")
     else:
         ax.plot(ts_main.index, ts_main.values, marker="o", linewidth=2.2, label=kw.lower())
-        rel = related_terms_for_keyword(df, kw, top_k=3)
+        rel = related_terms_for_keyword(frame_for_timeline, kw, top_k=3)
         for t in rel:
-            ts_t, _ = timeline_series(df, t, granularity)
+            ts_t, _ = timeline_series(frame_for_timeline, t, granularity)
             if not ts_t.empty:
                 ax.plot(ts_t.index, ts_t.values, marker="o", alpha=0.9, label=t)
         ax.set_title(f"Keyword timeline for '{kw}' and related terms")
@@ -316,7 +369,7 @@ def wc_text_for_sentiment(df_in, label):
     return " ".join(df_in[df_in["airline_sentiment"]==label]["display_text"].dropna().tolist()[:60000])
 
 if WC_AVAILABLE:
-    text_wc = wc_text_for_sentiment(df, sel_wc_sent)
+    text_wc = wc_text_for_sentiment(df_viz, sel_wc_sent)
     stop = set(STOPWORDS) | {"rt","https","http"}
     wc = WordCloud(width=900, height=350, background_color="white", colormap="magma", stopwords=stop).generate(text_wc)
     fig, ax = plt.subplots(figsize=(9,3.8), constrained_layout=True); ax.imshow(wc, interpolation="bilinear"); ax.axis("off")
@@ -339,7 +392,7 @@ def temp_png(buf):
     return td, path
 
 def build_pdf():
-    b1, b2, b3 = show_overall(), show_by_airline(top_n_airlines), show_neg_reasons(top_n_reasons)
+    b1, b2, b3 = show_overall(df_viz), show_by_airline(df_viz, top_n_airlines), show_neg_reasons(df_viz, top_n_reasons)
     tmp_dirs, paths = [], []
     for b in (b1,b2,b3):
         d, p = temp_png(b); tmp_dirs.append(d); paths.append(p)
@@ -364,9 +417,9 @@ def build_pdf():
     gen = f"Generated: {now}"
     pdf.cell(0, 8, gen if unicode_ready else safe_pdf_text(gen), ln=True, align="C")
     pdf.ln(8)
-    kpis = [f"Total tweets: {len(df):,}",
-            f"Negative share: {(df['airline_sentiment'].eq('negative').mean()*100):.1f}%",
-            f"Airlines: {df['airline'].nunique()}"]
+    kpis = [f"Total tweets: {len(df_viz):,}",
+            f"Negative share: {(df_viz['airline_sentiment'].eq('negative').mean()*100):.1f}%",
+            f"Airlines: {pd.Series(df_viz['airline']).nunique()}"]
     for k in kpis:
         pdf.cell(0, 8, k if unicode_ready else safe_pdf_text(k), ln=True, align="C")
     pdf.ln(6)
