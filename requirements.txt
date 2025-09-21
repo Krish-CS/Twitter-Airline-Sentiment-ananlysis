@@ -6,3 +6,4 @@ streamlit
 fpdf
 scikit-learn
 nltk
+better_profanity
