@@ -18,7 +18,14 @@ try:
 except Exception:
     WC_AVAILABLE = False
 
-from better_profanity import profanity
+# Safe profanity import with fallback so the app never crashes if the package is missing
+try:
+    from better_profanity import profanity
+except Exception:
+    class _NoProf:
+        def load_censor_words(self): pass
+        def censor(self, t): return t or ""
+    profanity = _NoProf()
 
 st.set_page_config(page_title="✈️ Twitter Sentiment", layout="centered")
 
@@ -67,14 +74,21 @@ st.markdown(f"""
 h1, h2, h3, label, .stMarkdown, .stTextInput, .stDataFrame {{ color:{TEXT_COLOR}; }}
 .metric-card {{ background:rgba(248,250,252,0.6); border:1px solid {BORDER}; padding:.75rem 1rem; border-radius:10px; }}
 .download-row button {{ background:linear-gradient(90deg,#6366f1,#22c55e)!important; color:white!important; }}
-.sharebar a {{ text-decoration:none; margin-right:.4rem; display:inline-block; padding:.35rem .55rem; border-radius:8px; }}
-.sharebar .wa {{ background:#25D366; color:white; }}
-.sharebar .tg {{ background:#229ED9; color:white; }}
-.sharebar .x  {{ background:#0f1419; color:white; }}
-.sharebar .li {{ background:#0a66c2; color:white; }}
-.sharebar .em {{ background:#475569; color:white; }}
+/* Share bar styles */
+.sharebar {{ display:flex; gap:.5rem; flex-wrap:wrap; }}
+.sharebtn {{
+  display:inline-flex; align-items:center; justify-content:center;
+  width:40px; height:40px; border-radius:50%; color:white;
+  text-decoration:none; box-shadow:0 2px 6px rgba(0,0,0,0.12);
+}}
+.wa {{ background:#25D366; }}
+.tg {{ background:#229ED9; }}
+.x  {{ background:#0f1419; }}
+.li {{ background:#0A66C2; }}
+.em {{ background:#475569; }}
+.sharebtn svg {{ width:22px; height:22px; fill:white; }}
 </style>
-""", unsafe_allow_html=True)  # HTML/Markdown styling for the app and share bar. [web:423]
+""", unsafe_allow_html=True)  # Allows custom HTML/CSS in Streamlit markdown. [web:423]
 
 sns.set_theme(style="whitegrid", context="talk")
 
@@ -87,11 +101,11 @@ CLEAN = "dataset/twitter_sentiment_clean.csv"
 
 def base_clean_text(txt):
     if pd.isna(txt): return ""
-    txt = re.sub(r"http\\S+","",str(txt))
+    txt = re.sub(r"http\S+","",str(txt))
     txt = re.sub(r"@[A-Za-z0-9_]+","",txt)
     txt = re.sub(r"#[A-Za-z0-9_]+","",txt)
-    txt = re.sub(r"[^a-zA-Z\\s]"," ",txt).lower()
-    txt = re.sub(r"\\s+"," ",txt).strip()
+    txt = re.sub(r"[^a-zA-Z\s]"," ",txt).lower()
+    txt = re.sub(r"\s+"," ",txt).strip()
     return txt
 
 def ensure_clean_csv():
@@ -116,7 +130,7 @@ def load_clean_df():
     def remove_profanity(text: str) -> str:
         if not isinstance(text, str): return ""
         censored = profanity.censor(text)
-        return re.sub(r"\\*+", " ", censored).strip()
+        return re.sub(r"\*+", " ", censored).strip()
     df["display_text"] = df["clean_text"].apply(remove_profanity)
     df["airline_sentiment"] = df["airline_sentiment"].str.lower()
     keep = {"positive","negative","neutral"}
@@ -140,7 +154,7 @@ selected_airlines = st.sidebar.multiselect(
     default=[],
     placeholder="All airlines",
     width="stretch",
-)  # Official multiselect control for filtering. [web:412]
+)  # Multiselect used to drive a filtered dataframe for all visuals. [web:412]
 
 def apply_airline_filter(frame: pd.DataFrame) -> pd.DataFrame:
     if selected_airlines:
@@ -149,31 +163,52 @@ def apply_airline_filter(frame: pd.DataFrame) -> pd.DataFrame:
 
 df_viz = apply_airline_filter(df)
 
-# ---------------- Share bar with safe secrets fallback ----------------
-def get_default_app_url() -> str:
-    try:
-        # st.secrets may raise if secrets.toml is missing, so wrap access. [web:435]
-        return st.secrets.get("APP_URL", "")
-    except Exception:
-        return os.environ.get("APP_URL", "")
+# ---------------- Share bar with fixed public URL + logo buttons ----------------
+APP_PUBLIC_URL = "https://twitter-airline-sentiment-analysis-from-krish-cs.streamlit.app/"
+ENC_URL = urllib.parse.quote_plus(APP_PUBLIC_URL)
 
 with st.sidebar.expander("Share this app"):
-    default_url = get_default_app_url()
-    app_url = st.text_input("Public app URL", value=default_url, placeholder="https://your-app.streamlit.app")
-    if app_url:
-        enc = urllib.parse.quote_plus(app_url)
-        share_html = f"""
-        <div class="sharebar">
-          <a class="wa" href="https://wa.me/?text={enc}" target="_blank">WhatsApp</a>
-          <a class="em" href="mailto:?subject=Twitter%20Sentiment%20Dashboard&body={enc}" target="_blank">Email</a>
-          <a class="tg" href="https://t.me/share/url?url={enc}" target="_blank">Telegram</a>
-          <a class="x"  href="https://twitter.com/intent/tweet?url={enc}&text=Check%20this%20dashboard" target="_blank">X</a>
-          <a class="li" href="https://www.linkedin.com/sharing/share-offsite/?url={enc}" target="_blank">LinkedIn</a>
-        </div>
-        """
-        st.markdown(share_html, unsafe_allow_html=True)  # Renders the share links in HTML. [web:423]
-    else:
-        st.caption("Enter your public app URL to enable one‑click sharing here.")  # Basic UX hint. [web:423]
+    share_html = f"""
+    <div class="sharebar" title="Share this app">
+      <!-- WhatsApp -->
+      <a class="sharebtn wa" aria-label="WhatsApp"
+         href="https://wa.me/?text={ENC_URL}" target="_blank" rel="noopener">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M20.5 3.5A11 11 0 0 0 2.2 18.3L1 23l4.8-1.2A11 11 0 1 0 20.5 3.5zM12 20.3a8.3 8.3 0 0 1-4.2-1.1l-.3-.2-2.5.6.7-2.4-.2-.3A8.3 8.3 0 1 1 20.3 12 8.3 8.3 0 0 1 12 20.3zm4.6-6.2c-.3-.2-1.7-.9-2-.9s-.5 0-.7.3-.8.9-1 .9-.5 0-.8-.3a6.2 6.2 0 0 1-1.8-1.6c-.4-.5-.7-1-.5-1.3s.2-.3.4-.5l.2-.3c.1-.2 0-.4 0-.5l-.7-1.8c-.2-.5-.4-.5-.6-.5h-.5a1 1 0 0 0-.7.4 2.9 2.9 0 0 0-.9 2.1 5 5 0 0 0 1.1 2.5c.3.4 2.2 3.2 5.4 4.4l1.7.6a4 4 0 0 0 1.8.1 2.4 2.4 0 0 0 1.6-1.1 2 2 0 0 0 .1-1.1c-.1-.1-.2-.2-.4-.3z"/>
+        </svg>
+      </a>
+      <!-- Telegram -->
+      <a class="sharebtn tg" aria-label="Telegram"
+         href="https://t.me/share/url?url={ENC_URL}" target="_blank" rel="noopener">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M22 2 2.9 9.2c-.8.3-.8.8-.1 1l4.9 1.5 1.9 6c.3.8.7.9 1.1.2l2.7-4 5.2 3.9c.6.4 1 .2 1.1-.6L23.6 3c.2-.9-.3-1.3-1.6-.8z"/>
+        </svg>
+      </a>
+      <!-- X (Twitter) -->
+      <a class="sharebtn x" aria-label="Post on X"
+         href="https://twitter.com/intent/tweet?url={ENC_URL}&text=Check%20this%20dashboard" target="_blank" rel="noopener">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M18.2 2H21l-6.6 7.5L22 22h-6.8l-5.3-6.9L3.9 22H1l7.1-8.1L2 2h6.9l4.8 6.3L18.2 2zM16.8 20h1.9L7.3 4H5.4l11.4 16z"/>
+        </svg>
+      </a>
+      <!-- LinkedIn -->
+      <a class="sharebtn li" aria-label="LinkedIn"
+         href="https://www.linkedin.com/sharing/share-offsite/?url={ENC_URL}" target="_blank" rel="noopener">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M4.98 3.5C4.98 4.88 3.86 6 2.5 6S0 4.88 0 3.5 1.12 1 2.5 1s2.48 1.12 2.48 2.5zM.5 8h4V23h-4V8zm7.98 0h3.84v2.05h.06c.53-.99 1.84-2.05 3.79-2.05 4.05 0 4.8 2.66 4.8 6.12V23h-4v-6.6c0-1.57-.03-3.6-2.2-3.6-2.2 0-2.54 1.72-2.54 3.5V23h-3.75V8z"/>
+        </svg>
+      </a>
+      <!-- Email -->
+      <a class="sharebtn em" aria-label="Email"
+         href="mailto:?subject=Twitter%20Sentiment%20Dashboard&body={ENC_URL}" target="_blank" rel="noopener">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M20 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2zm0 4-8 5-8-5V6l8 5 8-5v2z"/>
+        </svg>
+      </a>
+    </div>
+    """
+    st.markdown(share_html, unsafe_allow_html=True)  # Custom share buttons rendered via HTML/SVG. [web:423]
+    st.caption(f"Public URL: {APP_PUBLIC_URL}")  # Read-only display of the live URL. [web:407]
 
 # ---------------- KPIs ----------------
 st.markdown("## ✈️ Twitter Airline Sentiment Dashboard")
@@ -198,7 +233,7 @@ def show_overall(frame: pd.DataFrame):
     fig, ax = plt.subplots(figsize=(7.5,4.5), constrained_layout=True)
     sns.barplot(data=s, x="sentiment", y="count", hue="sentiment", palette="pastel", legend=False, ax=ax)
     ax.set_xlabel("Sentiment"); ax.set_ylabel("Number of tweets"); ax.set_title("Overall Sentiment Distribution", pad=10)
-    ax.bar_label(ax.containers[0], fmt="%d", padding=3)  # Annotate bars. [web:397]
+    ax.bar_label(ax.containers[0], fmt="%d", padding=3)
     return fig_to_buf(fig)
 
 def show_by_airline(frame: pd.DataFrame, n=6):
@@ -226,7 +261,7 @@ def show_neg_reasons(frame: pd.DataFrame, k=8):
     fig, ax = plt.subplots(figsize=(8.8,5.2), constrained_layout=True)
     sns.barplot(y=wrap_labels(top.index, 24), x=top.values, orient="h", palette=sns.color_palette("crest", n_colors=k), ax=ax)
     ax.set_xlabel("Number of tweets"); ax.set_ylabel("Negative reason"); ax.set_title("Top Negative Reasons", pad=10)
-    for c in ax.containers: ax.bar_label(c, fmt="%d", padding=3)  # Annotate bars. [web:397]
+    for c in ax.containers: ax.bar_label(c, fmt="%d", padding=3)
     return fig_to_buf(fig)
 
 # ---------------- Show one chart ----------------
@@ -256,7 +291,7 @@ def predict_vader(txt):
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False, max_entries=2)
 def build_hash_corpus(series):
     s = pd.Series(series).fillna("").astype(str).str.lower()
-    s = s.str.replace(r"[^a-z\\s]", " ", regex=True).str.replace(r"\\s+", " ", regex=True).str.strip()
+    s = s.str.replace(r"[^a-z\s]", " ", regex=True).str.replace(r"\s+", " ", regex=True).str.strip()
     s = s[s.str.len() >= 2]
     if s.empty:
         return None, None, None
@@ -269,7 +304,7 @@ hv, Xh, row_idx = build_hash_corpus(df["display_text"])
 user_tweet = st.text_area("Type a tweet to analyze and find similar tweets", placeholder="e.g., My flight got cancelled and support isn’t responding 😡")
 
 if st.button("🔍 Analyze my tweet"):
-    qt = re.sub(r"\\s+"," ", (user_tweet or "")).strip().lower()
+    qt = re.sub(r"\s+"," ", (user_tweet or "")).strip().lower()
     label, scores = predict_vader(qt)
     st.success(f"Predicted sentiment: {label.upper()} | compound={scores['compound']:.3f}")
     if hv is None or Xh is None or row_idx is None:
@@ -299,17 +334,17 @@ if st.button("🔍 Analyze my tweet"):
 st.markdown("### 📈 Keyword Timeline (with related terms)")
 
 def tokenize_corpus(series):
-    return series.str.lower().str.replace(r"[^a-z\\s]", " ", regex=True).str.replace(r"\\s+", " ", regex=True)
+    return series.str.lower().str.replace(r"[^a-z\s]", " ", regex=True).str.replace(r"\s+", " ", regex=True)
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False, max_entries=16)
 def related_terms_for_keyword(df_in, keyword, top_k=3):
     norm = df_in["display_text"].fillna("").str.lower()
     q = re.escape(keyword.lower())
-    mask = norm.str.contains(rf"\\b{q}\\b", regex=True)
+    mask = norm.str.contains(rf"\b{q}\b", regex=True)
     idx = df_in.index[mask]
     if len(idx) == 0:
         return []
-    vec = CountVectorizer(stop_words="english", token_pattern=r"(?u)\\b[a-z]{2,}\\b")
+    vec = CountVectorizer(stop_words="english", token_pattern=r"(?u)\b[a-z]{2,}\b")
     X = vec.fit_transform(norm.loc[idx])
     vocab = vec.get_feature_names_out()
     cts = X.sum(axis=0).A1
@@ -322,7 +357,7 @@ def timeline_series(df_in, term, granularity):
         return pd.Series(dtype=int), None
     rule = {"Day":"D","Week":"W","Month":"M"}[granularity]
     norm = df_in["display_text"].fillna("").str.lower()
-    mask = norm.str_contains = norm.str.contains(rf"\\b{re.escape(term)}\\b", regex=True)
+    mask = norm.str.contains(rf"\b{re.escape(term)}\b", regex=True)
     sub = df_in.loc[mask].dropna(subset=["tweet_created_dt"])
     if sub.empty:
         return pd.Series(dtype=int), None
